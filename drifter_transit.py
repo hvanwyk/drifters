@@ -5,13 +5,15 @@ Created on Sun Sep 11 16:45:58 2016
 @author: hans-werner
 """
 
+
 from datetime import datetime
+from scipy.io import mmwrite, mmread
 import pandas as pd
 import numpy as np
+import os
 import scipy.sparse as sp
-#from sklearn.preprocessing import normalize
-from scipy.io import mmwrite, mmread
 import matplotlib.pyplot as plt
+#from sklearn.preprocessing import normalize
 
 
 def buoy_date_parser(month_col, day_hour_col, year_col):
@@ -38,7 +40,6 @@ def load_lookup_table(data_dir, file_name):
                            index_col=0)
     lookup['birth_date'] = pd.to_datetime(lookup['birth_date'])
     lookup['death_date'] = pd.to_datetime(lookup['death_date'])   
-    
     return lookup
 
     
@@ -64,7 +65,6 @@ def load_buoy_data(data_dir, file_name):
                           date_parser=buoy_date_parser,\
                           header=None)
     data.columns = headers 
-    
     return data
 
 
@@ -81,7 +81,6 @@ def preprocess_missing_data(data):
     data.loc[data['var_lat'] > 990, 'var_lat'] = float('NaN')
     data.loc[data['var_lon'] > 990, 'var_lon'] = float('NaN')
     data.loc[data['var_temp'] > 990, 'var_temp'] = float('NaN')
-    
     return data
     
 
@@ -110,9 +109,7 @@ def get_spatial_range(data_dir, file_list):
         spatial_range: {'lon_min':lon_min, 'lon_max':lon_max, 
                         'lat_min':lat_min, 'lat_max':lat_max}
     """
-    #
     # Determine the spatial range
-    #     
     lon_min = 0.
     lon_max = 0.
     lat_min = 0.
@@ -122,9 +119,8 @@ def get_spatial_range(data_dir, file_list):
         data = load_buoy_data(data_dir, file_name)
         data = preprocess_missing_data(data)
         data = preprocess_fix_lon(data)
-        #
+        
         # Update Extrema
-        # 
         lon_min = min(data.lon.min(), lon_min)
         lon_max = max(data.lon.max(), lon_max)
         lat_min = min(data.lat.min(), lat_min)
@@ -132,11 +128,10 @@ def get_spatial_range(data_dir, file_list):
         
     spatial_range = {'lon_min':lon_min, 'lon_max':lon_max, 
                      'lat_min':lat_min, 'lat_max':lat_max}
-    
     return spatial_range
     
     
-def combine_transit_matrices(A,B,saveas=None):
+def combine_transit_matrices(A, B, saveas=None):
     """
     Inputs:
         
@@ -145,31 +140,23 @@ def combine_transit_matrices(A,B,saveas=None):
         saveas: filename, to save resulting matrix to file instead of
             returning it. 
     """
-    #
     # Check whether matrices are coo sparse
-    # 
     isAcoo = sp.isspmatrix_coo(A)
     isBcoo = sp.isspmatrix_coo(B)
     if not all([isAcoo,isBcoo]):
         raise Exception('Matrices should be sparse in coo format.')
         
-    #
     # Check whether matrices have the same shape
-    # 
     if A.shape != B.shape:
         raise Exception('Matrices should have the same shape.')
     
-    #
     # Combine matrices A and B
-    # 
     cdata = np.concatenate((A.data, B.data))
     crow = np.concatenate((A.row, B.row))
     ccol = np.concatenate((A.col, B.col))
     C = sp.coo_matrix((cdata,(crow,ccol)), shape= A.shape)
     
-    #
     # Save/return matrix C
-    # 
     if saveas == None:
         return C
     else:
@@ -191,6 +178,41 @@ def buoy_transitions(group, dt):
     group.loc[group['date'] >= sd+dt]['t_from'] = -1
     group.loc[group['date'] >= sd+dt]['t_to'] = -1
     return group
+
+
+def neighbors(matrix, i, j):
+    """
+    neighbors returns the positions of the neighbors of cell (i,j)
+    in the given matrix.
+
+    These are always in the domain of the matrix and guaranteed
+    to be valid positions.
+    """
+    directions = [
+        # Verticals and horizontals.
+        (0,  -1), (0,   1), (1,  0), (-1, 0),
+        # Diagonals.
+        (1,  -1), (-1, -1), (-1, 1), (1,  1)
+    ]
+    neighbors = []
+    for direction in directions:
+        # Check if horizontal directions are valid.
+        if i + direction[0] >= len(matrix) or i + direction[0] < 0:
+            continue
+        # Check if vertical directions are valid.
+        if j + direction[1] >= len(matrix) or j + direction[1] < 0:
+            continue
+        # If both horizontal and vertical directions are valid, add
+        # this neighbor position.
+        neighbors.append((i + direction[0], j + direction[1]))
+    return neighbors
+
+
+def fix_dangling_node(transition_matrix, i, j):
+    ij_neighbors = neighbors(transition_matrix, i, j)
+
+    for neighbor in ij_neighbors:
+        transition_matrix[neighbor[0]][neighbor[1]] = 1/len(ij_neighbors)
 
 
 def build_transit_matrix(data_dir, file_name, spatial_range, dx, 
@@ -221,7 +243,6 @@ def build_transit_matrix(data_dir, file_name, spatial_range, dx,
     # =========================================================================
     # Load Data File
     # =========================================================================
-    print('Loading data file')
     data = load_buoy_data(data_dir, file_name)
 
     # =========================================================================
@@ -231,7 +252,7 @@ def build_transit_matrix(data_dir, file_name, spatial_range, dx,
     
     date_mask = (data['date'] >= start_date) & (data['date'] <= end_date)
     if not any(date_mask):
-        print 'Data falls outside date range. Exiting.'
+        print('Data falls outside date range. Exiting.')
         return 
     
     data = data.loc[date_mask]
@@ -239,75 +260,62 @@ def build_transit_matrix(data_dir, file_name, spatial_range, dx,
     # =========================================================================
     # Pre-process
     # =========================================================================
-    print('Set 999 to NaN')
+    
+    # Set data <= 999 to NaN
     data = preprocess_missing_data(data)
   
-    
-    print('Check longitude')
+    # Check longitude
     data = preprocess_fix_lon(data)
     
     # =========================================================================
     # Assign cells to positions
     # =========================================================================
-    print('Assigning cell numbers to positions')
-    #
+    
     # Define mesh first
-    #
     lon_min = spatial_range['lon_min']
     lon_max = spatial_range['lon_max']
     lat_min = spatial_range['lat_min']
     lat_max = spatial_range['lat_max']
     
-    #
     # dx degree boxes
-    #
     lon_bins = np.arange(np.floor(lon_min), np.ceil(lon_max)+dx,dx)
     lat_bins = np.arange(np.floor(lat_min), np.ceil(lat_max)+dx,dx)
     n_lon = len(lon_bins)-1
     n_lat = len(lat_bins)-1
 
-    #
     # Bin
-    #
     i_lat = pd.cut(data.lat, lat_bins, include_lowest=True, labels=False)
     i_lon = pd.cut(data.lon, lon_bins, include_lowest=True, labels=False)
 
-    #
     # Assign cells to buoys
-    #
     data['cell'] = n_lon*i_lat + i_lon
-
 
     # =========================================================================
     # Assign seasons to dates
     # =========================================================================
-    print('Assigning seasons')
-    #
+    
     # Two monthly seasons
-    #
     season_duration = 12/n_seasons
     season_bins = np.arange(0,13,season_duration)
     m = pd.DatetimeIndex(data['date']).month
     data['season'] = pd.cut(m, season_bins, right=True, labels=False)
 
-
     # =========================================================================
     # Count transitions
     # =========================================================================
-    print('Counting transitions')
-    
     
     gdata = data.groupby('id')
     f = lambda group: buoy_transitions(group,dt)
     data = gdata.apply(f)
     data['t_from'] = data.t_from.fillna(-1)
     data['t_to'] = data.t_to.fillna(-1)
-    data['transitions'] = zip(data.t_from.astype(int), data.t_to.astype(int))    
+    data['transitions'] = list(zip(data.t_from.astype(int), data.t_to.astype(int))) 
     #data['transitions'] = data[['t_from','t_to']].apply(tuple, axis=1) #zip(data.t_from, data.t_to)
     #data.loc[data['t_from'].isnull(),'transitions'] = float('NaN')
 
-
-    print('Forming transit matrix')
+    # =========================================================================
+    # Forming transit matrix
+    # =========================================================================
     count = []
     A = []
     for s in range(n_seasons):
@@ -317,201 +325,11 @@ def build_transit_matrix(data_dir, file_name, spatial_range, dx,
         j = np.array([ij[1] for ij in count[s].index.values])
         a = np.array([c for c in count[s].astype(float)])
     
-        #
         # Throw away -1 entries
-        #
         ichuck = (i==-1) | (j==-1)
         i = i[~ichuck]
         j = j[~ichuck]
         a = a[~ichuck] 
         A.append(sp.coo_matrix((a,(i,j)),shape=((n_lat*n_lon),(n_lat*n_lon))))
-        #A[s] = normalize(A[s], norm='l1', axis=1, copy=True)
 
     return A
-
-    
-if __name__ == '__main__':
-    data_dir = '/home/hans-werner/Dropbox/work/projects/drifters/data/buoydata/'
-    file_1 = 'buoydata_1_5000.dat'
-    file_2 = 'buoydata_5001_10000.dat'
-    file_3 = 'buoydata_10001_dec15.dat'
-    file_list = [file_1,file_2,file_3]
-    #spatial_range = get_spatial_range(data_dir, file_list)
-    spatial_range = {'lon_min': -180., 'lon_max': 180., 
-                     'lat_min': -78., 'lat_max': 90.}
-    cellwidth = 1.
-    start_date = datetime(1979,2,15,0)
-    end_date = datetime(1989,12,31,23,59)
-    date_range = [start_date, end_date]
-    dt = pd.Timedelta('30 days')
-    
-    # =========================================================================
-    # Experiment 1: Seasons
-    # =========================================================================    
-    #
-    # Inputs
-    #     
-    lookup_file = 'lookup_table_datetime.dat'
-    lookup = load_lookup_table(data_dir, lookup_file)
-    cellwidth = 1.
-    start_date = lookup.birth_date.min().to_datetime()
-    end_date = lookup.death_date.max().to_datetime()
-    date_range  = [start_date, end_date]
-    dt = pd.Timedelta('30 days')
-    n_season_list = [12,6,4]
-    file_list = [file_1, file_2, file_3]
-    
-    #
-    # Form matrices
-    #
-    A = [[],[],[]]
-    season_counter = 0 
-    for n_seasons in n_season_list:
-        file_counter = 0
-        for file_name in file_list:
-            print 'File:', file_name
-            Atmp = build_transit_matrix(data_dir, file_name, spatial_range, 
-                                        cellwidth, date_range, n_seasons, dt)
-            if file_counter == 0:
-                A[season_counter] = Atmp
-            else:
-                for i in range(n_seasons):
-                    A[season_counter][i] = \
-                        combine_transit_matrices(A[season_counter][i],Atmp[i])
-        season_counter += 1
-    
-    #
-    # Combine them into yearly matrices
-    # 
-    Ay = [[],[],[]]
-    sc = 0
-    for n_seasons in n_season_list:
-         for i in range(n_seasons):
-             if i == 0:
-                 Ay[sc] = A[sc][i].tocsr()
-             else:
-                 Ay[sc] = Ay[sc].dot(Ay[sc].tocsr())
-    sc += 1
-    
-    
-    # =========================================================================
-    # Experiment 2: Time depence
-    # =========================================================================
-    
-
-    
-    
-    #combine_transit_matrices(A[0], A[1],saveas='new/A12.mtx')
-    
-    """
-    # =============================================================================
-    # Tests
-    # =============================================================================
-    #
-    # Normalize by row sums
-    #  
-    A0 = A[0].tocsr()
-    row_sums = np.array(A0.sum(axis=1))[:,0]
-    row_indices, col_indices = A0.nonzero()
-    A0 /= row_sums[row_indices]
-    
-    #
-    # Extract states with nonzero rows
-    # 
-    
-    #
-    # Compare dominant eigenvectors of 6 seasons.
-    # 
-    
-    
-    for s in range(6):
-        #
-        # Compute dominant eigenvalues/eigenvectors
-        #
-        if s == 0:
-            As = A[s].tocsr()
-        else:
-            As = A[s].tocsr().dot(As)
-            
-    x = np.ones(shape=(n_lat*n_lon,1))
-    print  
-    for i in range(100):
-        x = A0.dot(x)    
-        print np.sum(x,0)
-    U,s,VT = sp.linalg.svds(A0.transpose(),k=10)    
-    w,u = sp.linalg.eigs(A0.transpose(),k=10)    
-    
-    
-    A0 = A[0].tocsr()
-    x = np.ones(shape=(n_lat*n_lon,1))/float(n_lat*n_lon)
-    for i in range(10000):
-        x = A0.transpose().dot(x)
-    
-    
-    all_cells = range(n_lat*n_lon)
-    all_lat = np.divide(all_cells,n_lon)
-    all_lon = np.remainder(all_cells,n_lon)
-    H = np.zeros(shape=(n_lon,n_lat))
-    H[all_lon,all_lat] = x[:,0]
-    fig = plt.figure(figsize=(7, 3))
-    ax = fig.add_subplot(131)
-    ax.set_title('pcolormesh: exact bin edges')
-    X, Y = np.meshgrid(lon_bins, lat_bins)
-    plt.imshow(np.log(H.transpose()))
-    #ax.set_aspect('equal')
-    ax.show()
-    # =============================================================================
-    # Write data to file
-    # =============================================================================
-   
-    for s in range(6):
-        f = open('A%i_1_5000.txt' %s, 'w')
-        mmwrite(f,A[s])
-        f.close()
-    """
-    """
-    fig = plt.figure(figsize=(7, 3))
-    ax = fig.add_subplot(131)
-    
-    """
-    
-                    
-    """
-    Extracting triple from coo matrix:
-    a = A.data
-    i = A.row
-    j = A.col
-    """    
-    
-    """
-    #
-    # Determine a natural spatial range for test case
-    #
-    lat_min = 0
-    lat_max = 0
-    lon_min = 0
-    lon_max = 0
-    count = 0
-    for idx in lookup.index:
-        print count
-        count += 1
-        buoy = Buoy(idx, lookup, data_dir)
-        tlat_min, tlat_max, tlon_min, tlon_max = buoy.spatial_range()
-        lat_min = min(tlat_min,lat_min)
-        lat_max = max(tlat_max,lat_max)
-        lon_min = min(tlon_min,lon_min)
-        lon_max = max(tlon_max,lon_max)
-        del buoy
-    mesh = Mesh(spatial_range,n_lat=n_lat,n_lon=n_lon)
-    
-    #
-    # Specify date range
-    #
-    date_range = [pd.datetime(1980,03,1),pd.datetime(1990,12,1)]
-    dt = pd.Timedelta('60 days')
-    
-    seasons = {'period':'year', 'num_seasons':6}
-    
-    #A = Transit(mesh, lookup, data_dir, dt,
-    #                date_range=date_range, seasons=seasons)
-    """

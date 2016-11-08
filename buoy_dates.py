@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from pylab import savefig
 
 
 def extract_dates(filename):
@@ -64,4 +65,4 @@ if __name__ == '__main__':
     plt.title('Number of Buoys Collecting Data in Each Year')
     plt.xlabel('Years')
     plt.ylabel('# Buoys')
-    plt.show()
+    savefig('buoys_per_year.png', bbox_inches='tight')
