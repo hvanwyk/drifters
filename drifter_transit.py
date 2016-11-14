@@ -163,6 +163,16 @@ def combine_transit_matrices(A, B, saveas=None):
         f = open(saveas,'w')
         mmwrite(f, C)
         f.close()
+ 
+        
+def count_transitions(data, dt):
+    gdata = data.groupby('id')
+    f = lambda group: buoy_transitions(group,dt)
+    data = gdata.apply(f)
+    data['t_from'] = data.t_from.fillna(-1)
+    data['t_to'] = data.t_to.fillna(-1)
+    data['transitions'] = list(zip(data.t_from.astype(int), data.t_to.astype(int)))
+    return data     
     
     
 def buoy_transitions(group, dt):
@@ -215,6 +225,58 @@ def fix_dangling_node(transition_matrix, i, j):
         transition_matrix[neighbor[0]][neighbor[1]] = 1/len(ij_neighbors)
 
 
+def bin_buoy_locations(data, spatial_range, dx):
+    """
+    
+    """
+    # Define mesh first
+    lon_min = spatial_range['lon_min']
+    lon_max = spatial_range['lon_max']
+    lat_min = spatial_range['lat_min']
+    lat_max = spatial_range['lat_max']
+    
+    # dx degree boxes
+    lon_bins = np.arange(np.floor(lon_min), np.ceil(lon_max)+dx,dx)
+    lat_bins = np.arange(np.floor(lat_min), np.ceil(lat_max)+dx,dx)
+    n_lon = len(lon_bins)-1
+    n_lat = len(lat_bins)-1
+
+    # Bin
+    i_lat = pd.cut(data.lat, lat_bins, include_lowest=True, labels=False)
+    i_lon = pd.cut(data.lon, lon_bins, include_lowest=True, labels=False)
+
+    # Assign cells to buoys
+    data['cell'] = n_lon*i_lat + i_lon
+    
+    return data
+
+
+def restrict_to_date_range(data, date_range):
+    """
+    """
+    start_date, end_date = date_range
+    
+    date_mask = (data['date'] >= start_date) & (data['date'] <= end_date)
+    if not any(date_mask):
+        print('Data falls outside date range. Exiting.')
+        return 
+    
+    data = data.loc[date_mask]
+    return data
+
+
+def assign_seasons(data, n_seasons):
+    """
+    
+    """
+    # Two monthly seasons
+    season_duration = 12/n_seasons
+    season_bins = np.arange(0,13,season_duration)
+    m = pd.DatetimeIndex(data['date']).month
+    data['season'] = pd.cut(m, season_bins, right=True, labels=False)
+    return data
+
+
 def build_transit_matrix(data_dir, file_name, spatial_range, dx, 
                          date_range, n_seasons, dt):
     """
@@ -246,21 +308,11 @@ def build_transit_matrix(data_dir, file_name, spatial_range, dx,
     data = load_buoy_data(data_dir, file_name)
 
     # =========================================================================
-    # Restrict to date range
-    # =========================================================================  
-    start_date, end_date = date_range
-    
-    date_mask = (data['date'] >= start_date) & (data['date'] <= end_date)
-    if not any(date_mask):
-        print('Data falls outside date range. Exiting.')
-        return 
-    
-    data = data.loc[date_mask]
-
-    # =========================================================================
     # Pre-process
-    # =========================================================================
-    
+    # =========================================================================  
+    # Restrict to date range 
+    data = restrict_to_date_range(data, date_range)
+
     # Set data <= 999 to NaN
     data = preprocess_missing_data(data)
   
@@ -270,51 +322,23 @@ def build_transit_matrix(data_dir, file_name, spatial_range, dx,
     # =========================================================================
     # Assign cells to positions
     # =========================================================================
-    
-    # Define mesh first
-    lon_min = spatial_range['lon_min']
-    lon_max = spatial_range['lon_max']
-    lat_min = spatial_range['lat_min']
-    lat_max = spatial_range['lat_max']
-    
-    # dx degree boxes
-    lon_bins = np.arange(np.floor(lon_min), np.ceil(lon_max)+dx,dx)
-    lat_bins = np.arange(np.floor(lat_min), np.ceil(lat_max)+dx,dx)
-    n_lon = len(lon_bins)-1
-    n_lat = len(lat_bins)-1
-
-    # Bin
-    i_lat = pd.cut(data.lat, lat_bins, include_lowest=True, labels=False)
-    i_lon = pd.cut(data.lon, lon_bins, include_lowest=True, labels=False)
-
-    # Assign cells to buoys
-    data['cell'] = n_lon*i_lat + i_lon
+    data = bin_buoy_locations(data, spatial_range, dx)
 
     # =========================================================================
     # Assign seasons to dates
     # =========================================================================
-    
-    # Two monthly seasons
-    season_duration = 12/n_seasons
-    season_bins = np.arange(0,13,season_duration)
-    m = pd.DatetimeIndex(data['date']).month
-    data['season'] = pd.cut(m, season_bins, right=True, labels=False)
+    data = assign_seasons(data,n_seasons)
 
     # =========================================================================
     # Count transitions
     # =========================================================================
-    
-    gdata = data.groupby('id')
-    f = lambda group: buoy_transitions(group,dt)
-    data = gdata.apply(f)
-    data['t_from'] = data.t_from.fillna(-1)
-    data['t_to'] = data.t_to.fillna(-1)
-    data['transitions'] = list(zip(data.t_from.astype(int), data.t_to.astype(int))) 
+    data = count_transitions(data,dt)
+
     #data['transitions'] = data[['t_from','t_to']].apply(tuple, axis=1) #zip(data.t_from, data.t_to)
     #data.loc[data['t_from'].isnull(),'transitions'] = float('NaN')
 
     # =========================================================================
-    # Forming transit matrix
+    # Form transit matrix
     # =========================================================================
     count = []
     A = []
